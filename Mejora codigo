@@ -1,0 +1,157 @@
+import os
+import subprocess
+import threading
+import tkinter as tk
+from tkinter import filedialog, messagebox, Scale
+import numpy as np
+import matplotlib.pyplot as plt
+import librosa
+import librosa.display
+from scipy.fft import fft, ifft
+import sounddevice as sd
+import soundfile as sf
+from pydub import AudioSegment
+
+def verificar_ffmpeg():
+    try:
+        subprocess.run(["ffmpeg", "-version"], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        messagebox.showerror("Error", "FFmpeg no encontrado. Descárgalo en: https://ffmpeg.org/download.html")
+
+class AudioPlayerApp:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Reproductor y Análisis de Audio")
+        self.audio_file = None
+        self.cleaned_audio_fft = None
+        self.sr = None
+        self.is_playing = False
+        
+        self.frame_botones = tk.Frame(root)
+        self.frame_botones.pack(pady=20)
+        
+        self.btn_cargar = tk.Button(self.frame_botones, text="Cargar Audio", command=self.load_audio)
+        self.btn_cargar.grid(row=0, column=0, padx=10, pady=5)
+        
+        self.btn_reproducir = tk.Button(self.frame_botones, text="Reproducir", command=self.play_audio)
+        self.btn_reproducir.grid(row=1, column=0, padx=10, pady=5)
+        
+        self.btn_detener = tk.Button(self.frame_botones, text="Detener", command=self.stop_audio)
+        self.btn_detener.grid(row=2, column=0, padx=10, pady=5)
+        
+        self.btn_limpiar_fft = tk.Button(self.frame_botones, text="Aplicar FFT", command=self.clean_audio_fft)
+        self.btn_limpiar_fft.grid(row=3, column=0, padx=10, pady=5)
+        
+        self.btn_guardar = tk.Button(self.frame_botones, text="Guardar Audio", command=self.save_cleaned_audio_fft)
+        self.btn_guardar.grid(row=4, column=0, padx=10, pady=5)
+        
+        self.btn_graficar = tk.Button(self.frame_botones, text="Graficar Espectrograma", command=self.plot_spectrogram)
+        self.btn_graficar.grid(row=5, column=0, padx=10, pady=5)
+        
+        self.slider = Scale(root, from_=1, to=100, resolution=1, orient='horizontal', label="Umbral FFT (%)")
+        self.slider.set(10)
+        self.slider.pack(pady=10)
+        
+    def convert_to_wav(self, file_path):
+        audio = AudioSegment.from_file(file_path)
+        wav_path = file_path.rsplit(".", 1)[0] + ".wav"
+        audio.export(wav_path, format="wav")
+        return wav_path
+    
+    def load_audio(self):
+        file_path = filedialog.askopenfilename(filetypes=[("Archivos de audio", "*.wav;*.mp3;*.flac")])
+        if file_path:
+            if not file_path.endswith(".wav"):
+                file_path = self.convert_to_wav(file_path)
+            try:
+                self.audio_file, self.sr = librosa.load(file_path, sr=None)
+                messagebox.showinfo("Carga Exitosa", "Archivo de audio cargado correctamente.")
+            except Exception as e:
+                messagebox.showerror("Error", f"Error al cargar el audio: {e}")
+    
+    def play_audio(self):
+        if self.audio_file is not None:
+            threading.Thread(target=sd.play, args=(self.audio_file, self.sr)).start()
+    
+    def stop_audio(self):
+        sd.stop()
+    
+    def clean_audio_fft(self):
+        if self.audio_file is None:
+            messagebox.showwarning("Advertencia", "No hay audio cargado para procesar.")
+            return
+        
+        fft_transform = fft(self.audio_file)
+        threshold = (self.slider.get() / 100) * np.max(np.abs(fft_transform))
+        fft_transform[np.abs(fft_transform) < threshold] = 0
+        self.cleaned_audio_fft = np.real(ifft(fft_transform))
+        messagebox.showinfo("Proceso Exitoso", "Se ha aplicado la FFT y limpiado el audio.")
+    
+    def save_cleaned_audio_fft(self):
+        if self.cleaned_audio_fft is None:
+            messagebox.showwarning("Advertencia", "No hay audio limpio para guardar.")
+            return
+        file_path = filedialog.asksaveasfilename(defaultextension=".wav", filetypes=[["Archivo WAV", "*.wav"]])
+        if file_path:
+            try:
+                sf.write(file_path, self.cleaned_audio_fft, self.sr)
+                messagebox.showinfo("Guardado Exitoso", "El audio limpio ha sido guardado correctamente.")
+            except Exception as e:
+                messagebox.showerror("Error", f"Error al guardar el audio: {e}")
+    
+    def frequency_to_note(self, frequency):
+        if frequency <= 0:
+            return "No detectada"
+        a4 = 440.0
+        midi_num = 12 * np.log2(frequency / a4) + 69
+        midi_num_rounded = int(round(midi_num))
+        if midi_num_rounded < 0 or midi_num_rounded > 127:
+            return "Fuera de rango"
+        notes = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+        octave = (midi_num_rounded // 12) - 1
+        note_index = midi_num_rounded % 12
+        return f"{notes[note_index]}{octave}"
+    
+    def get_predominant_note(self, signal):
+        f0, voiced_flag, voiced_probs = librosa.pyin(signal, 
+                                                    fmin=librosa.note_to_hz('C2'), 
+                                                    fmax=librosa.note_to_hz('C7'), 
+                                                    sr=self.sr)
+        f0 = f0[~np.isnan(f0)]
+        if len(f0) == 0:
+            return "No detectada"
+        predominant_freq = np.median(f0)
+        return self.frequency_to_note(predominant_freq)
+    
+    def plot_spectrogram(self):
+        if self.audio_file is None:
+            messagebox.showwarning("Advertencia", "No hay audio cargado para graficar.")
+            return
+
+        plt.figure(figsize=(12, 8))
+        
+        # Espectrograma Original
+        plt.subplot(2, 1, 1)
+        D = librosa.amplitude_to_db(np.abs(librosa.stft(self.audio_file)), ref=np.max)
+        librosa.display.specshow(D, sr=self.sr, x_axis='time', y_axis='log')
+        plt.colorbar(format='%+2.0f dB')
+        note_original = self.get_predominant_note(self.audio_file)
+        plt.title(f"Espectrograma Original - Nota: {note_original}")
+
+        # Espectrograma Procesado
+        if self.cleaned_audio_fft is not None:
+            plt.subplot(2, 1, 2)
+            D_clean = librosa.amplitude_to_db(np.abs(librosa.stft(self.cleaned_audio_fft)), ref=np.max)
+            librosa.display.specshow(D_clean, sr=self.sr, x_axis='time', y_axis='log')
+            plt.colorbar(format='%+2.0f dB')
+            note_clean = self.get_predominant_note(self.cleaned_audio_fft)
+            plt.title(f"Espectrograma Procesado - Nota: {note_clean}")
+
+        plt.tight_layout()
+        plt.show()
+
+if __name__ == "__main__":
+    verificar_ffmpeg()
+    root = tk.Tk()
+    app = AudioPlayerApp(root)
+    root.mainloop()
